@@ -2,6 +2,18 @@
 
 A Model Context Protocol (MCP) server providing access to the complete GoHighLevel API. This server enables AI assistants like Claude to interact with GoHighLevel's services including contacts, opportunities, calendars, workflows, and more.
 
+## 🚀 Quick Start
+
+```bash
+npx @drausal/gohighlevel-mcp
+```
+
+Or install globally:
+
+```bash
+npm install -g @drausal/gohighlevel-mcp
+```
+
 ## 🚀 Features
 
 - **Complete API Coverage**: Access to all GoHighLevel API endpoints
@@ -19,57 +31,37 @@ A Model Context Protocol (MCP) server providing access to the complete GoHighLev
 
 ## 🔧 Installation
 
-### 1. Clone or Download
+### Quick Start with npx (Recommended)
+
+No installation needed! Use npx to run the server directly:
 
 ```bash
-cd /path/to/gohighlevel-mcp
+npx @drausal/gohighlevel-mcp
 ```
 
-### 2. Install Dependencies
+### Alternative: Install Globally
 
-Using pnpm (recommended):
+For permanent installation:
+
 ```bash
+npm install -g @drausal/gohighlevel-mcp
+```
+
+Then run:
+```bash
+gohighlevel-mcp
+```
+
+### From Source (Development)
+
+For development or customization:
+
+```bash
+git clone https://github.com/drausal/gohighlevel-mcp.git
+cd gohighlevel-mcp
 pnpm install
-```
-
-Using npm:
-```bash
-npm install
-```
-
-### 3. Configure Environment
-
-Copy the example environment file:
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and add your credentials:
-
-```env
-# Choose ONE authentication method:
-
-# Option 1: Bearer Token (Simplest)
-BEARER_TOKEN_BEARERAUTH=your_api_key_here
-
-# Option 2: OAuth2 (Recommended for production)
-# For Agency Access
-OAUTH_CLIENT_ID_AGENCY_ACCESS=your_client_id
-OAUTH_CLIENT_SECRET_AGENCY_ACCESS=your_client_secret
-
-# For Location Access
-OAUTH_CLIENT_ID_LOCATION_ACCESS=your_client_id
-OAUTH_CLIENT_SECRET_LOCATION_ACCESS=your_client_secret
-
-# Server Configuration (optional)
-PORT=3000
-LOG_LEVEL=info
-```
-
-### 4. Build the Server
-
-```bash
 pnpm run build
+pnpm start
 ```
 
 ## 🎯 Usage
@@ -78,6 +70,41 @@ pnpm run build
 
 Add this to your Claude Desktop configuration (`~/Library/Application Support/Claude/claude_desktop_config.json` on macOS):
 
+#### Using npx (Recommended):
+```json
+{
+  "mcpServers": {
+    "gohighlevel": {
+      "command": "npx",
+      "args": [
+        "@drausal/gohighlevel-mcp"
+      ],
+      "env": {
+        "BEARER_TOKEN_BEARERAUTH": "your_api_key_here",
+        "BEARER_TOKEN_BEARER": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+#### Using global installation:
+```json
+{
+  "mcpServers": {
+    "gohighlevel": {
+      "command": "gohighlevel-mcp",
+      "args": [],
+      "env": {
+        "BEARER_TOKEN_BEARERAUTH": "your_api_key_here",
+        "BEARER_TOKEN_BEARER": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+#### Using local installation:
 ```json
 {
   "mcpServers": {
@@ -87,7 +114,29 @@ Add this to your Claude Desktop configuration (`~/Library/Application Support/Cl
         "/absolute/path/to/gohighlevel-mcp/build/index.js"
       ],
       "env": {
-        "BEARER_TOKEN_BEARERAUTH": "your_api_key_here"
+        "BEARER_TOKEN_BEARERAUTH": "your_api_key_here",
+        "BEARER_TOKEN_BEARER": "your_api_key_here"
+      }
+    }
+  }
+}
+```
+
+### Warp Terminal Configuration
+
+For Warp users, use the npx method:
+
+```json
+{
+  "mcpServers": {
+    "gohighlevel": {
+      "command": "npx",
+      "args": [
+        "@drausal/gohighlevel-mcp"
+      ],
+      "env": {
+        "BEARER_TOKEN_BEARERAUTH": "your_api_key_here",
+        "BEARER_TOKEN_BEARER": "your_api_key_here"
       }
     }
   }
@@ -97,6 +146,13 @@ Add this to your Claude Desktop configuration (`~/Library/Application Support/Cl
 ### Running Standalone
 
 ```bash
+# With npx
+npx @drausal/gohighlevel-mcp
+
+# With global installation
+gohighlevel-mcp
+
+# From source
 pnpm start
 ```
 
