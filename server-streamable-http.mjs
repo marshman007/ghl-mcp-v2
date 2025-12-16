@@ -145,31 +145,30 @@ function sendJsonRpc(message) {
   });
 }
 
-function readRequestBody(req) {
-  return new Promise((resolve, reject) => {
-    const MAX_BODY_SIZE = 1024 * 1024; // 1MB
-    const chunks = [];
-    let totalLength = 0;
+req.on('data', (chunk) => {
+  totalLength += chunk.length;
+  if (totalLength > MAX_BODY_SIZE) {
+    if (!finished) {
+      finished = true;
+      reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
+    }
+    req.destroy();
+    return;
+  }
+  chunks.push(chunk);
+});
 
-    req.on('data', (chunk) => {
-      totalLength += chunk.length;
-      if (totalLength > MAX_BODY_SIZE) {
-        req.destroy();
-        reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
-        return;
-      }
-      chunks.push(chunk);
-    });
+req.on('end', () => {
+  if (finished) return;
+  finished = true;
+  resolve(Buffer.concat(chunks).toString('utf8'));
+});
 
-    req.on('end', () => {
-      resolve(Buffer.concat(chunks).toString('utf8'));
-    });
-
-    req.on('error', (err) => {
-      reject(err);
-    });
-  });
-}
+req.on('error', (err) => {
+  if (finished) return;
+  finished = true;
+  reject(err);
+});
 
 function originAllowed(origin) {
   if (!origin || ORIGIN_ALLOWLIST.length === 0) {
