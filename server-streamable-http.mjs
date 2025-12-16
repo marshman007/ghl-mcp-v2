@@ -87,6 +87,17 @@ function sendJsonRpc(message) {
 
     if (hasId) {
       key = JSON.stringify(message.id);
+      if (pendingResponses.has(key)) {
+        reject({
+          jsonrpc: '2.0',
+          error: {
+            code: -32600,
+            message: 'A request with this id is already pending'
+          },
+          id: message.id
+        });
+        return;
+      }
       timeoutId = setTimeout(() => {
         const entry = pendingResponses.get(key);
         if (entry) {
