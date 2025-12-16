@@ -69,6 +69,7 @@ function flushStdoutBuffer() {
 }
 
 child.stdout.on('data', (chunk) => {
+  console.error("[RAW STDOUT]", JSON.stringify(chunk.toString("utf8")));
   stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
   flushStdoutBuffer();
 });
