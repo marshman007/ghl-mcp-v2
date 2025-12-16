@@ -32,37 +32,24 @@ let stdoutBuffer = Buffer.alloc(0);
 
 function flushStdoutBuffer() {
   while (true) {
-    const headerEnd = stdoutBuffer.indexOf('\r\n\r\n');
-    if (headerEnd === -1) {
+    const newlineIndex = stdoutBuffer.indexOf('\n');
+    if (newlineIndex === -1) {
       return;
     }
 
-    const headerText = stdoutBuffer.slice(0, headerEnd).toString('utf8');
-    const headers = Object.create(null);
-    for (const line of headerText.split('\r\n')) {
-      const [rawName, ...rest] = line.split(':');
-      if (!rawName || rest.length === 0) continue;
-      headers[rawName.trim().toLowerCase()] = rest.join(':').trim();
-    }
+    const line = stdoutBuffer
+      .slice(0, newlineIndex)
+      .toString('utf8')
+      .replace(/\r$/, '');
+    stdoutBuffer = stdoutBuffer.slice(newlineIndex + 1);
 
-    const contentLength = Number(headers['content-length']);
-    if (!Number.isFinite(contentLength)) {
-      console.error('Missing Content-Length header from MCP server');
-      stdoutBuffer = Buffer.alloc(0);
-      return;
+    if (!line) {
+      continue;
     }
-
-    const messageEnd = headerEnd + 4 + contentLength;
-    if (stdoutBuffer.length < messageEnd) {
-      return;
-    }
-
-    const body = stdoutBuffer.slice(headerEnd + 4, messageEnd);
-    stdoutBuffer = stdoutBuffer.slice(messageEnd);
 
     let payload;
     try {
-      payload = JSON.parse(body.toString('utf8'));
+      payload = JSON.parse(line);
     } catch (err) {
       console.error('Invalid JSON from MCP server:', err);
       continue;
@@ -92,9 +79,7 @@ child.stdout.on('error', (err) => {
 
 function sendJsonRpc(message) {
   return new Promise((resolve, reject) => {
-    const serialized = JSON.stringify(message);
-    const content = Buffer.from(serialized, 'utf8');
-    const header = Buffer.from(`Content-Length: ${content.length}\r\n\r\n`, 'utf8');
+    const payloadBuffer = Buffer.from(`${JSON.stringify(message)}\n`, 'utf8');
 
     const hasId = Object.prototype.hasOwnProperty.call(message, 'id');
     let timeoutId;
@@ -122,8 +107,7 @@ function sendJsonRpc(message) {
     }
 
     try {
-      child.stdin.write(header);
-      child.stdin.write(content);
+      child.stdin.write(payloadBuffer);
     } catch (err) {
       if (hasId && key) {
         const entry = pendingResponses.get(key);
@@ -217,4 +201,3 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
 });
-
