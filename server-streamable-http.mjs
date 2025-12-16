@@ -184,12 +184,12 @@ function originAllowed(origin) {
 }
 
 const server = http.createServer(async (req, res) => {
-  if (!originAllowed(req.headers.origin)) {
-    res.writeHead(403, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Forbidden' }));
+  if (req.method === 'GET' && req.url === '/health') {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ok');
     return;
   }
-
+  
   if (req.method !== 'POST' || req.url !== '/mcp') {
     res.writeHead(404, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Not Found' }));
