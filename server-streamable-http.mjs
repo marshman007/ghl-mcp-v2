@@ -215,6 +215,11 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-server.listen(PORT, HOST, () => {
-  console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
+const PORT = Number(process.env.PORT || 8080);
+const HOST = "0.0.0.0";
+
+server.listen(PORT, "0.0.0.0", () => {
+  console.error(`HTTP MCP wrapper listening on 0.0.0.0:${PORT}`);
 });
+
+
