@@ -1,3 +1,5 @@
+console.error("BOOT: server-streamable-http.mjs starting");
+
 import http from 'node:http';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
