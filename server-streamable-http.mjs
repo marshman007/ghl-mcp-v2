@@ -2,8 +2,8 @@ import http from 'node:http';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
 
-const HOST = process.env.HOST || '127.0.0.1';
 const PORT = Number(process.env.PORT || 8080);
+const HOST = "0.0.0.0";
 const ORIGIN_ALLOWLIST = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(origin => origin.trim())
@@ -214,12 +214,7 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ error: 'Failed to execute MCP request' }));
   }
 });
-
-
-const HOST = "0.0.0.0";
-
-server.listen(PORT, "0.0.0.0", () => {
-  console.error(`HTTP MCP wrapper listening on 0.0.0.0:${PORT}`);
+server.listen(PORT, HOST, () => {
+  console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
 });
-
 
