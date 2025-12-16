@@ -3,7 +3,7 @@ import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
 
 const HOST = process.env.HOST || '127.0.0.1';
-const PORT = Number(process.env.PORT || 3010);
+const PORT = Number(process.env.PORT || 8080);
 const ORIGIN_ALLOWLIST = (process.env.ALLOWED_ORIGINS || '')
   .split(',')
   .map(origin => origin.trim())
@@ -215,7 +215,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const PORT = Number(process.env.PORT || 8080);
+
 const HOST = "0.0.0.0";
 
 server.listen(PORT, "0.0.0.0", () => {
