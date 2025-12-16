@@ -87,24 +87,6 @@ function sendJsonRpc(message) {
 
     if (hasId) {
       key = JSON.stringify(message.id);
-      const rejectDuplicate = () => {
-        reject(
-          Object.assign(new Error('Duplicate JSON-RPC id in flight'), {
-            jsonRpcError: {
-              jsonrpc: Object.prototype.hasOwnProperty.call(message, 'jsonrpc') ? message.jsonrpc : '2.0',
-              id: message.id,
-              error: {
-                code: -32600,
-                message: 'Duplicate JSON-RPC id in flight',
-              },
-            },
-          })
-        );
-      };
-      if (pendingResponses.has(key)) {
-        rejectDuplicate();
-        return;
-      }
       timeoutId = setTimeout(() => {
         const entry = pendingResponses.get(key);
         if (entry) {
@@ -145,30 +127,14 @@ function sendJsonRpc(message) {
   });
 }
 
-req.on('data', (chunk) => {
-  totalLength += chunk.length;
-  if (totalLength > MAX_BODY_SIZE) {
-    if (!finished) {
-      finished = true;
-      reject(Object.assign(new Error('Request body too large'), { statusCode: 413 }));
-    }
-    req.destroy();
-    return;
-  }
-  chunks.push(chunk);
-});
-
-req.on('end', () => {
-  if (finished) return;
-  finished = true;
-  resolve(Buffer.concat(chunks).toString('utf8'));
-});
-
-req.on('error', (err) => {
-  if (finished) return;
-  finished = true;
-  reject(err);
-});
+function readRequestBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
 
 function originAllowed(origin) {
   if (!origin || ORIGIN_ALLOWLIST.length === 0) {
@@ -195,11 +161,6 @@ const server = http.createServer(async (req, res) => {
     bodyText = await readRequestBody(req);
   } catch (err) {
     console.error('Failed to read request body:', err);
-    if (err && err.statusCode === 413) {
-      res.writeHead(413, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ error: 'Request body too large' }));
-      return;
-    }
     res.writeHead(500, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to read request body' }));
     return;
@@ -233,11 +194,6 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify(response));
   } catch (err) {
     console.error('Failed to handle MCP request:', err);
-    if (hasId && err && err.jsonRpcError) {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(err.jsonRpcError));
-      return;
-    }
     res.writeHead(502, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to execute MCP request' }));
   }
