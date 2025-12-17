@@ -183,7 +183,6 @@ function originAllowed(origin) {
   return ORIGIN_ALLOWLIST.includes(origin);
 }
 
-const child = spawn(...);
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'content-type': 'text/plain' });
