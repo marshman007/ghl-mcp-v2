@@ -183,6 +183,7 @@ function originAllowed(origin) {
   return ORIGIN_ALLOWLIST.includes(origin);
 }
 
+const child = spawn(...);
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
     res.writeHead(200, { 'content-type': 'text/plain' });
@@ -238,6 +239,7 @@ const server = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ error: 'Failed to execute MCP request' }));
   }
 });
+
 server.listen(PORT, HOST, () => {
   console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
 });
@@ -245,16 +247,13 @@ server.listen(PORT, HOST, () => {
 let shuttingDown = false;
 
 function handleSignal(signal) {
-  console.error(
-    shuttingDown
-      ? `Received ${signal}, already shutting down`
-      : `Received ${signal}, initiating graceful shutdown`
-  );
-
   if (shuttingDown) {
+    console.error(`Received ${signal}, already shutting down`);
     return;
   }
   shuttingDown = true;
+
+  console.error(`Received ${signal}, initiating graceful shutdown`);
 
   const forceExitTimer = setTimeout(() => {
     console.error('Graceful shutdown timed out, forcing exit');
@@ -263,9 +262,12 @@ function handleSignal(signal) {
   forceExitTimer.unref();
 
   server.close(() => {
+    console.error('HTTP server closed');
+
     if (child && !child.killed) {
       child.kill('SIGTERM');
     }
+
     clearTimeout(forceExitTimer);
     process.exit(0);
   });
