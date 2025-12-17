@@ -241,3 +241,16 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, HOST, () => {
   console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
 });
+
+function handleSignal(signal) {
+  console.error(`Received ${signal}, initiating graceful shutdown`);
+  server.close(() => {
+    if (child) {
+      child.kill('SIGTERM');
+    }
+    process.exit(0);
+  });
+}
+
+process.on('SIGTERM', () => handleSignal('SIGTERM'));
+process.on('SIGINT', () => handleSignal('SIGINT'));
