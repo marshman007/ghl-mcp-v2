@@ -6,31 +6,35 @@ import { spawn } from 'node:child_process';
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = "0.0.0.0";
-const ORIGIN_ALLOWLIST = (process.env.ALLOWED_ORIGINS || '')
-  .split(',')
-  .map(origin => origin.trim())
-  .filter(Boolean);
+const MAX_CHILD_RESTARTS = 3;
+const SOCKET_DESTROY_GRACE_MS = 5000;
+const CHILD_BACKOFF_STEP_MS = 1000;
 
-const child = spawn('node', ['build/index.js'], {
-  stdio: ['pipe', 'pipe', 'inherit'],
-});
-
-child.on('error', (err) => {
-  console.error('Failed to start MCP server:', err);
-  process.exit(1);
-});
-
-child.on('exit', (code, signal) => {
-  console.error(`MCP server exited with code ${code} signal ${signal}`);
-  process.exit(code ?? 1);
-});
-
-child.stdin.on('error', (err) => {
-  console.error('Error writing to MCP server stdin:', err);
-});
+let shuttingDown = false;
+let child = null;
+let childRestartAttempts = 0;
+let childRestartTimer = null;
+let forceExitTimer = null;
+let serverClosed = false;
+let childExited = false;
+let socketsDestroyed = false;
+let childSignaled = false;
+const sockets = new Set();
+let socketDestroyTimer = null;
 
 const pendingResponses = new Map();
 let stdoutBuffer = Buffer.alloc(0);
+
+function rejectAllPending(error) {
+  for (const [key, entry] of pendingResponses.entries()) {
+    try {
+      entry.reject(error);
+    } catch (err) {
+      console.error('Failed to reject pending response', err);
+    }
+  }
+  pendingResponses.clear();
+}
 
 function flushStdoutBuffer() {
   while (true) {
@@ -70,18 +74,148 @@ function flushStdoutBuffer() {
   }
 }
 
-child.stdout.on('data', (chunk) => {
-  stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
-  flushStdoutBuffer();
-});
+function spawnChildProcess() {
+  if (shuttingDown) {
+    return;
+  }
 
-child.stdout.on('error', (err) => {
-  console.error('Error reading MCP server stdout:', err);
-});
+  child = spawn('node', ['build/index.js'], {
+    stdio: ['pipe', 'pipe', 'inherit'],
+  });
+
+  stdoutBuffer = Buffer.alloc(0);
+
+  child.stdin.on('error', (err) => {
+    console.error('Error writing to MCP server stdin:', err);
+  });
+
+  child.stdout.on('data', (chunk) => {
+    stdoutBuffer = Buffer.concat([stdoutBuffer, chunk]);
+    flushStdoutBuffer();
+  });
+
+  child.stdout.on('error', (err) => {
+    console.error('Error reading MCP server stdout:', err);
+  });
+
+  child.on('error', (err) => {
+    console.error('Failed to start MCP server:', err);
+    process.exit(1);
+  });
+
+  child.on('exit', (code, signal) => {
+    child = null;
+
+    if (shuttingDown) {
+      console.error(`MCP server exited during shutdown with code ${code} signal ${signal}`);
+      childExited = true;
+      maybeExit(0);
+      return;
+    }
+
+    console.error(`MCP server exited with code ${code} signal ${signal}`);
+    rejectAllPending(new Error('MCP server exited unexpectedly'));
+
+    if (childRestartAttempts >= MAX_CHILD_RESTARTS) {
+      console.error('Exceeded maximum MCP restart attempts, exiting');
+      process.exit(1);
+    }
+
+    childRestartAttempts += 1;
+    const delay = childRestartAttempts * CHILD_BACKOFF_STEP_MS;
+    console.error(`Restarting MCP server in ${delay}ms (attempt ${childRestartAttempts}/${MAX_CHILD_RESTARTS})`);
+
+    childRestartTimer = setTimeout(() => {
+      childRestartTimer = null;
+      spawnChildProcess();
+    }, delay);
+    childRestartTimer.unref();
+  });
+}
+
+function signalChildProcess() {
+  if (childSignaled) {
+    return;
+  }
+  childSignaled = true;
+
+  if (!forceExitTimer) {
+    forceExitTimer = setTimeout(() => {
+      console.error('Graceful shutdown timed out, forcing exit');
+      process.exit(1);
+    }, 10000);
+    forceExitTimer.unref();
+  }
+
+  if (child && !child.killed) {
+    child.kill('SIGTERM');
+  } else {
+    childExited = true;
+    maybeExit();
+  }
+}
+
+function destroySocketsAndSignalChild() {
+  if (socketsDestroyed) {
+    signalChildProcess();
+    return;
+  }
+
+  socketsDestroyed = true;
+  console.error('Destroying remaining sockets');
+
+  for (const socket of sockets) {
+    try {
+      socket.destroy();
+    } catch (err) {
+      console.error('Failed to destroy socket during shutdown', err);
+    }
+  }
+
+  signalChildProcess();
+}
+
+function scheduleSocketDestroy() {
+  if (socketDestroyTimer || socketsDestroyed) {
+    return;
+  }
+
+  const delay = sockets.size > 0 ? SOCKET_DESTROY_GRACE_MS : 0;
+  socketDestroyTimer = setTimeout(() => {
+    socketDestroyTimer = null;
+    destroySocketsAndSignalChild();
+  }, delay);
+  socketDestroyTimer.unref();
+}
+
+function maybeExit(code = 0) {
+  if (!shuttingDown) {
+    return;
+  }
+
+  if (serverClosed && childExited) {
+    if (forceExitTimer) {
+      clearTimeout(forceExitTimer);
+      forceExitTimer = null;
+    }
+    process.exit(code);
+  }
+}
 
 function sendJsonRpc(message) {
   return new Promise((resolve, reject) => {
+    if (shuttingDown) {
+      reject(new Error('Server is shutting down'));
+      return;
+    }
+
+    if (!child || child.killed) {
+      reject(new Error('MCP server is not available'));
+      return;
+    }
+
     const payloadBuffer = Buffer.from(`${JSON.stringify(message)}\n`, 'utf8');
+    const targetChild = child;
 
     const hasId = Object.prototype.hasOwnProperty.call(message, 'id');
     let timeoutId;
@@ -120,7 +254,7 @@ function sendJsonRpc(message) {
     }
 
     try {
-      child.stdin.write(payloadBuffer);
+      targetChild.stdin.write(payloadBuffer);
     } catch (err) {
       if (hasId && key) {
         const entry = pendingResponses.get(key);
@@ -176,12 +310,7 @@ function readRequestBody(req) {
   });
 }
 
-function originAllowed(origin) {
-  if (!origin || ORIGIN_ALLOWLIST.length === 0) {
-    return true;
-  }
-  return ORIGIN_ALLOWLIST.includes(origin);
-}
+spawnChildProcess();
 
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
@@ -239,11 +368,24 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
+server.on('connection', (socket) => {
+  sockets.add(socket);
+
+  socket.on('close', () => {
+    sockets.delete(socket);
+    if (shuttingDown && sockets.size === 0) {
+      if (socketDestroyTimer) {
+        clearTimeout(socketDestroyTimer);
+        socketDestroyTimer = null;
+      }
+      destroySocketsAndSignalChild();
+    }
+  });
+});
+
 server.listen(PORT, HOST, () => {
   console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
 });
-
-let shuttingDown = false;
 
 function handleSignal(signal) {
   if (shuttingDown) {
@@ -254,22 +396,23 @@ function handleSignal(signal) {
 
   console.error(`Received ${signal}, initiating graceful shutdown`);
 
-  const forceExitTimer = setTimeout(() => {
-    console.error('Graceful shutdown timed out, forcing exit');
-    process.exit(1);
-  }, 10000);
-  forceExitTimer.unref();
+  if (childRestartTimer) {
+    clearTimeout(childRestartTimer);
+    childRestartTimer = null;
+  }
 
   server.close(() => {
     console.error('HTTP server closed');
-
-    if (child && !child.killed) {
-      child.kill('SIGTERM');
-    }
-
-    clearTimeout(forceExitTimer);
-    process.exit(0);
+    serverClosed = true;
+    maybeExit();
   });
+
+  scheduleSocketDestroy();
+
+  if (!child) {
+    childExited = true;
+    maybeExit();
+  }
 }
 
 process.on('SIGTERM', () => handleSignal('SIGTERM'));
