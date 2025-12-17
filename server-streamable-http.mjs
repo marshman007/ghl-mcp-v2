@@ -242,12 +242,31 @@ server.listen(PORT, HOST, () => {
   console.error(`HTTP MCP wrapper listening on ${HOST}:${PORT}`);
 });
 
+let shuttingDown = false;
+
 function handleSignal(signal) {
-  console.error(`Received ${signal}, initiating graceful shutdown`);
+  console.error(
+    shuttingDown
+      ? `Received ${signal}, already shutting down`
+      : `Received ${signal}, initiating graceful shutdown`
+  );
+
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+
+  const forceExitTimer = setTimeout(() => {
+    console.error('Graceful shutdown timed out, forcing exit');
+    process.exit(1);
+  }, 10000);
+  forceExitTimer.unref();
+
   server.close(() => {
-    if (child) {
+    if (child && !child.killed) {
       child.kill('SIGTERM');
     }
+    clearTimeout(forceExitTimer);
     process.exit(0);
   });
 }
