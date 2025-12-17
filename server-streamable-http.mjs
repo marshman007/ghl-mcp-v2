@@ -3,12 +3,25 @@ console.error("BOOT: server-streamable-http.mjs starting");
 import http from 'node:http';
 import { Buffer } from 'node:buffer';
 import { spawn } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = "0.0.0.0";
 const MAX_CHILD_RESTARTS = 3;
 const SOCKET_DESTROY_GRACE_MS = 5000;
 const CHILD_BACKOFF_STEP_MS = 1000;
+const TOKEN_REFRESH_GRACE_MS = 2 * 60 * 1000;
+const TOKEN_URL = process.env.GHL_TOKEN_URL || 'https://services.leadconnectorhq.com/oauth/token';
+const DEFAULT_GHL_HOSTS = process.env.GHL_API_HOSTS || 'services.leadconnectorhq.com';
+
+const tokenStoreConfig = createTokenStoreConfig(process.env.TOKEN_STORE_JSON);
+const TOKEN_STORE_PATH = tokenStoreConfig.path;
+process.env.GHL_TOKEN_STORE_PATH = TOKEN_STORE_PATH;
+process.env.GHL_API_HOSTS = DEFAULT_GHL_HOSTS;
+
+const HEADER_INJECTOR_PATH = ensureHeaderInjectorModule();
 
 let shuttingDown = false;
 let child = null;
@@ -21,6 +34,12 @@ let socketsDestroyed = false;
 let childSignaled = false;
 const sockets = new Set();
 let socketDestroyTimer = null;
+
+let activeTokens = loadTokens();
+if (activeTokens) {
+  console.error('Tokens loaded on boot');
+}
+let refreshPromise = null;
 
 const pendingResponses = new Map();
 let stdoutBuffer = Buffer.alloc(0);
@@ -74,13 +93,379 @@ function flushStdoutBuffer() {
   }
 }
 
+function createTokenStoreConfig(rawValue) {
+  if (rawValue) {
+    try {
+      const parsed = JSON.parse(rawValue);
+      if (parsed && typeof parsed === 'object') {
+        if (parsed.path && typeof parsed.path === 'string') {
+          return { ...parsed, path: path.resolve(parsed.path) };
+        }
+        return { ...parsed, path: path.join(process.cwd(), '.ghl-token-store.json') };
+      }
+    } catch {
+      // Ignore parse errors and fall back to default path.
+    }
+  }
+  return { path: path.join(process.cwd(), '.ghl-token-store.json') };
+}
+
+function ensureHeaderInjectorModule() {
+  const injectorPath = path.join(os.tmpdir(), 'ghl-header-injector.cjs');
+  const source = `'use strict';
+const fs = require('node:fs');
+const http = require('node:http');
+const https = require('node:https');
+const { URL } = require('node:url');
+
+const tokenFilePath = process.env.GHL_TOKEN_STORE_PATH;
+const hostList = (process.env.GHL_API_HOSTS || 'services.leadconnectorhq.com')
+  .split(',')
+  .map((value) => value.trim().toLowerCase())
+  .filter(Boolean);
+
+let cachedTokens = null;
+let cachedMtime = 0;
+
+function readTokens() {
+  if (!tokenFilePath) {
+    return null;
+  }
+  let stats;
+  try {
+    stats = fs.statSync(tokenFilePath);
+  } catch {
+    cachedTokens = null;
+    cachedMtime = 0;
+    return null;
+  }
+  if (cachedTokens && cachedMtime === stats.mtimeMs) {
+    return cachedTokens;
+  }
+  try {
+    const raw = fs.readFileSync(tokenFilePath, 'utf8');
+    cachedTokens = JSON.parse(raw);
+    cachedMtime = stats.mtimeMs;
+    return cachedTokens;
+  } catch {
+    cachedTokens = null;
+    cachedMtime = 0;
+    return null;
+  }
+}
+
+function headerExists(headers, name) {
+  const target = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === target) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function shouldAttach(hostname, requestPath) {
+  if (!hostname) {
+    return false;
+  }
+  const normalizedPath = typeof requestPath === 'string' ? requestPath.toLowerCase() : '';
+  if (normalizedPath.includes('/oauth/token')) {
+    return false;
+  }
+  const lower = hostname.toLowerCase();
+  if (hostList.length === 0) {
+    return true;
+  }
+  return hostList.some((host) => lower === host || lower.endsWith('.' + host));
+}
+
+function attach(headers, hostname, requestPath) {
+  if (!shouldAttach(hostname, requestPath)) {
+    return;
+  }
+  const tokens = readTokens();
+  const pathLabel = typeof requestPath === 'string' ? requestPath : '';
+  if (!tokens || !tokens.access_token) {
+    console.error(`[auth] missing access token host=${hostname || 'unknown'} path=${pathLabel}`); // Avoid crashing the child when auth tokens are absent
+    return;
+  }
+  if (!tokens.locationId) {
+    console.error(`[auth] missing Target-User-SubAccount host=${hostname || 'unknown'} path=${pathLabel}`); // Avoid crashing the child when subaccount header is absent
+    return;
+  }
+  if (!headerExists(headers, 'authorization')) {
+    headers['Authorization'] = 'Bearer ' + tokens.access_token;
+  }
+  if (!headerExists(headers, 'target-user-subaccount')) {
+    headers['Target-User-SubAccount'] = tokens.locationId;
+  }
+}
+
+function cloneOptionsFromUrl(url) {
+  return {
+    protocol: url.protocol,
+    hostname: url.hostname,
+    port: url.port,
+    auth: url.username ? url.username + ':' + url.password : undefined,
+    path: (url.pathname || '') + (url.search || ''),
+  };
+}
+
+function patchModule(targetModule) {
+  const originalRequest = targetModule.request;
+  targetModule.request = function patchedRequest(options, callback) {
+    let finalOptions = options;
+    if (typeof finalOptions === 'string') {
+      finalOptions = cloneOptionsFromUrl(new URL(finalOptions));
+    } else if (finalOptions instanceof URL) {
+      finalOptions = cloneOptionsFromUrl(finalOptions);
+    } else if (finalOptions && typeof finalOptions === 'object') {
+      finalOptions = { ...finalOptions };
+    }
+    if (finalOptions && typeof finalOptions === 'object') {
+      finalOptions.headers = { ...(finalOptions.headers || {}) };
+      const hostname = finalOptions.hostname || (typeof finalOptions.host === 'string' ? finalOptions.host.split(':')[0] : '');
+      const pathValue = typeof finalOptions.path === 'string' ? finalOptions.path : '';
+      attach(finalOptions.headers, hostname, pathValue);
+      return originalRequest.call(this, finalOptions, callback);
+    }
+    return originalRequest.call(this, options, callback);
+  };
+  targetModule.get = function patchedGet(options, callback) {
+    const req = targetModule.request(options, callback);
+    req.end();
+    return req;
+  };
+}
+
+patchModule(http);
+patchModule(https);
+`;
+  fs.writeFileSync(injectorPath, source, 'utf8');
+  return injectorPath;
+}
+
+function appendNodeRequire(existingOptions, requiredPath) {
+  const flag = `--require ${requiredPath}`;
+  if (!existingOptions || existingOptions.trim() === '') {
+    return flag;
+  }
+  if (existingOptions.includes(flag)) {
+    return existingOptions;
+  }
+  return `${existingOptions} ${flag}`.trim();
+}
+
+function loadTokens() {
+  try {
+    const raw = fs.readFileSync(TOKEN_STORE_PATH, 'utf8').trim();
+    if (!raw) {
+      return null;
+    }
+    return normalizePersistedTokens(JSON.parse(raw));
+  } catch (err) {
+    if (err && err.code !== 'ENOENT') {
+      throw err;
+    }
+    return null;
+  }
+}
+
+function normalizePersistedTokens(data) {
+  if (!data || typeof data !== 'object') {
+    return null;
+  }
+  const { access_token, refresh_token, expires_at, locationId } = data;
+  if (!access_token || !refresh_token || !expires_at || !locationId) {
+    return null;
+  }
+  const expiresAtMs = Date.parse(expires_at);
+  if (!Number.isFinite(expiresAtMs)) {
+    return null;
+  }
+  return {
+    access_token,
+    refresh_token,
+    expires_at: new Date(expiresAtMs).toISOString(),
+    expiresAtMs,
+    locationId,
+  };
+}
+
+function saveTokens(tokenResponse) {
+  const normalized = normalizeNewTokens(tokenResponse);
+  const payload = {
+    access_token: normalized.access_token,
+    refresh_token: normalized.refresh_token,
+    expires_at: normalized.expires_at,
+    locationId: normalized.locationId,
+  };
+  writeTokenStore(payload);
+  activeTokens = normalized;
+  return normalized;
+}
+
+function normalizeNewTokens(tokenResponse) {
+  if (!tokenResponse || typeof tokenResponse !== 'object') {
+    throw new Error('Invalid token response');
+  }
+  const accessToken = tokenResponse.access_token;
+  if (!accessToken) {
+    throw new Error('Token response missing access_token');
+  }
+  const refreshToken = tokenResponse.refresh_token || activeTokens?.refresh_token;
+  if (!refreshToken) {
+    logMissingToken();
+    throw createTokenError('Token response missing refresh_token', 401);
+  }
+  const locationId = tokenResponse.locationId || tokenResponse.locationID || tokenResponse.location_id || activeTokens?.locationId;
+  if (!locationId) {
+    logMissingTargetHeader();
+    throw createTokenError('Token response missing locationId', 400);
+  }
+  const expiresAtMs = tokenResponse.expires_at
+    ? Date.parse(tokenResponse.expires_at)
+    : Date.now() + ((tokenResponse.expires_in ?? 0) * 1000);
+  if (!Number.isFinite(expiresAtMs)) {
+    throw new Error('Token response contains invalid expires_at');
+  }
+  return {
+    access_token: accessToken,
+    refresh_token: refreshToken,
+    expires_at: new Date(expiresAtMs).toISOString(),
+    expiresAtMs,
+    locationId,
+  };
+}
+
+function writeTokenStore(payload) {
+  const dir = path.dirname(TOKEN_STORE_PATH);
+  fs.mkdirSync(dir, { recursive: true });
+  const tempPath = `${TOKEN_STORE_PATH}.tmp`;
+  fs.writeFileSync(tempPath, JSON.stringify(payload), 'utf8');
+  fs.renameSync(tempPath, TOKEN_STORE_PATH);
+}
+
+function tokensNeedRefresh(token) {
+  if (!token || !token.expiresAtMs) {
+    return true;
+  }
+  return token.expiresAtMs - Date.now() <= TOKEN_REFRESH_GRACE_MS;
+}
+
+async function ensureTokensReady() {
+  if (!activeTokens) {
+    logMissingToken();
+    throw createTokenError('OAuth tokens not initialized. Please complete the OAuth flow.', 401);
+  }
+  if (!activeTokens.locationId) {
+    logMissingTargetHeader();
+    throw createTokenError('Missing Target-User-SubAccount. Re-authorize OAuth.', 400);
+  }
+  if (!tokensNeedRefresh(activeTokens)) {
+    return activeTokens;
+  }
+  if (!activeTokens.refresh_token) {
+    logMissingToken();
+    throw createTokenError('Refresh token missing. Re-authorize OAuth.', 401);
+  }
+  if (!refreshPromise) {
+    refreshPromise = (async () => {
+      const updated = await refreshAccessToken(activeTokens.refresh_token);
+      console.error('Token refreshed');
+      return updated;
+    })().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+async function refreshAccessToken(refreshToken) {
+  const clientId = process.env.GHL_CLIENT_ID;
+  const clientSecret = process.env.GHL_CLIENT_SECRET;
+  if (!clientId || !clientSecret) {
+    throw createTokenError('Missing GHL OAuth client credentials', 500);
+  }
+  const body = new URLSearchParams();
+  body.set('grant_type', 'refresh_token');
+  body.set('refresh_token', refreshToken);
+  body.set('client_id', clientId);
+  body.set('client_secret', clientSecret);
+
+  let response;
+  try {
+    response = await fetch(TOKEN_URL, {
+      method: 'POST',
+      headers: { 'content-type': 'application/x-www-form-urlencoded' },
+      body: body.toString(),
+    });
+  } catch (err) {
+    throw createTokenError('Failed to reach token endpoint during refresh', 502);
+  }
+
+  const text = await response.text();
+  if (!response.ok) {
+    throw createTokenError('Failed to refresh OAuth tokens', 502);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    throw createTokenError('Token refresh returned invalid JSON', 502);
+  }
+  parsed.refresh_token = parsed.refresh_token || refreshToken;
+  parsed.locationId = parsed.locationId || activeTokens?.locationId;
+  return saveTokens(parsed);
+}
+
+function logMissingToken() {
+  console.error('Missing token for MCP request');
+}
+
+function logMissingTargetHeader() {
+  console.error('Missing Target-User-SubAccount value');
+}
+
+function createTokenError(message, statusCode) {
+  const error = new Error(message);
+  error.statusCode = statusCode;
+  return error;
+}
+
+function shouldRequireTokens(payload) {
+  if (!payload || typeof payload !== 'object') {
+    return false;
+  }
+  const method = typeof payload.method === 'string' ? payload.method.toLowerCase() : '';
+  if (!method) {
+    return false;
+  }
+  if (method === 'tools/list' || method === 'tools.list' || method === 'list_tools') {
+    return false;
+  }
+  if (method === 'ping' || method === 'mcp/heartbeat') {
+    return false;
+  }
+  return true;
+}
+
 function spawnChildProcess() {
   if (shuttingDown) {
     return;
   }
 
+  const childEnv = {
+    ...process.env,
+    GHL_TOKEN_STORE_PATH: TOKEN_STORE_PATH,
+    GHL_API_HOSTS: process.env.GHL_API_HOSTS || DEFAULT_GHL_HOSTS,
+  };
+  childEnv.NODE_OPTIONS = appendNodeRequire(childEnv.NODE_OPTIONS, HEADER_INJECTOR_PATH);
+  process.env.NODE_OPTIONS = childEnv.NODE_OPTIONS;
+
   child = spawn('node', ['build/index.js'], {
     stdio: ['pipe', 'pipe', 'inherit'],
+    env: childEnv,
   });
 
   stdoutBuffer = Buffer.alloc(0);
@@ -416,8 +801,25 @@ const server = http.createServer(async (req, res) => {
         return;
       }
 
+      let persistedTokens;
+      try {
+        persistedTokens = saveTokens(tokens);
+      } catch (err) {
+        const statusCode = err?.statusCode || 502;
+        res.writeHead(statusCode, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: err?.message || 'Failed to persist tokens' }));
+        return;
+      }
+
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ tokens }));
+      res.end(JSON.stringify({
+        tokens: {
+          access_token: persistedTokens.access_token,
+          refresh_token: persistedTokens.refresh_token,
+          expires_at: persistedTokens.expires_at,
+          locationId: persistedTokens.locationId
+        }
+      }));
     } catch (err) {
       console.error('Error exchanging authorization code:', err);
       res.writeHead(502, { 'content-type': 'application/json' });
@@ -455,6 +857,18 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(400, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'JSON-RPC payload must be an object' }));
     return;
+  }
+
+  const requiresTokens = shouldRequireTokens(payload);
+  if (requiresTokens) {
+    try {
+      await ensureTokensReady();
+    } catch (err) {
+      const statusCode = err?.statusCode || 502;
+      res.writeHead(statusCode, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: err?.message || 'Failed to prepare OAuth tokens' }));
+      return;
+    }
   }
 
   const hasId = payload != null && Object.prototype.hasOwnProperty.call(payload, 'id');
