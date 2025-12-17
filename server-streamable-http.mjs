@@ -318,6 +318,113 @@ const server = http.createServer(async (req, res) => {
     res.end('ok');
     return;
   }
+
+  if (req.method === 'GET' && req.url && req.url.startsWith('/oauth/start')) {
+    const clientId = process.env.GHL_CLIENT_ID;
+    const redirectUri = process.env.GHL_REDIRECT_URI;
+    const scopes = process.env.GHL_SCOPES;
+    const authorizeUrl = process.env.GHL_AUTH_URL || 'https://marketplace.gohighlevel.com/oauth/authorize';
+
+    if (!clientId || !redirectUri || !scopes) {
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('Missing OAuth configuration');
+      return;
+    }
+
+    let redirectLocation;
+    try {
+      const url = new URL(authorizeUrl);
+      url.searchParams.set('response_type', 'code');
+      url.searchParams.set('client_id', clientId);
+      url.searchParams.set('redirect_uri', redirectUri);
+      url.searchParams.set('scope', scopes);
+      const state = process.env.GHL_OAUTH_STATE || Math.random().toString(36).slice(2);
+      url.searchParams.set('state', state);
+      redirectLocation = url.toString();
+    } catch (err) {
+      console.error('Invalid GHL_AUTH_URL value:', err);
+      res.writeHead(500, { 'content-type': 'text/plain' });
+      res.end('Invalid OAuth authorize URL');
+      return;
+    }
+
+    res.writeHead(302, { Location: redirectLocation });
+    res.end();
+    return;
+  }
+
+  if (req.method === 'GET' && req.url && req.url.startsWith('/oauth/callback')) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    } catch (err) {
+      console.error('Failed to parse callback URL:', err);
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid callback URL' }));
+      return;
+    }
+
+    const code = parsedUrl.searchParams.get('code');
+    if (!code) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing authorization code' }));
+      return;
+    }
+
+    const clientId = process.env.GHL_CLIENT_ID;
+    const clientSecret = process.env.GHL_CLIENT_SECRET;
+    const redirectUri = process.env.GHL_REDIRECT_URI;
+    const tokenUrl = process.env.GHL_TOKEN_URL || 'https://services.leadconnectorhq.com/oauth/token';
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      res.writeHead(500, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Missing OAuth configuration' }));
+      return;
+    }
+
+    const body = new URLSearchParams();
+    body.set('grant_type', 'authorization_code');
+    body.set('code', code);
+    body.set('redirect_uri', redirectUri);
+    body.set('client_id', clientId);
+    body.set('client_secret', clientSecret);
+
+    try {
+      const tokenResponse = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/x-www-form-urlencoded'
+        },
+        body: body.toString()
+      });
+
+      const responseText = await tokenResponse.text();
+      if (!tokenResponse.ok) {
+        console.error('Failed to exchange authorization code:', tokenResponse.status, responseText);
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Failed to exchange authorization code' }));
+        return;
+      }
+
+      let tokens;
+      try {
+        tokens = JSON.parse(responseText);
+      } catch (err) {
+        console.error('Token endpoint returned non-JSON response:', err);
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Invalid token response format' }));
+        return;
+      }
+
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ tokens }));
+    } catch (err) {
+      console.error('Error exchanging authorization code:', err);
+      res.writeHead(502, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Failed to exchange authorization code' }));
+    }
+    return;
+  }
   
   if (req.method !== 'POST' || req.url !== '/mcp') {
     res.writeHead(404, { 'content-type': 'application/json' });
