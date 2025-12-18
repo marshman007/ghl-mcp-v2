@@ -41995,7 +41995,7 @@
           },
           "logoUrl": {
             "type": "string",
-            "example": "https://firebasestorage.googleapis.com/v0/b/highlevel-staging.appspot.com/o/companyPhotos%2F5DP4iH6HLkQsiKESj6rh.gif?alt=media&token=2aec9720-59a7-46af-a187-d4a2774ee873"
+            "example": "https://example.com/sample.gif"
           },
           "phone": {
             "type": "string",
@@ -47939,7 +47939,7 @@
               "faviconUrl": "",
               "globalSectionVersion": 1,
               "globalSectionsPath": "funnel/SkIDfu0S4m3NYQyvWHC6/global-sections-1",
-              "globalSectionsUrl": "https://firebasestorage.googleapis.com/v0/b/highlevel-staging.appspot.com/o/funnel%2FSkIDfu0S4m3NYQyvWHC6%2Fglobal-sections-1?alt=media&token=9cc5c211-093b-4751-aeba-19282ac92955",
+              "globalSectionsUrl": "https://example.com/sample.gif",
               "isStoreActive": false,
               "trackingCodeBody": "",
               "trackingCodeHead": "",
