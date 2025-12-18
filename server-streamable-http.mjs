@@ -420,6 +420,264 @@ async function refreshAccessToken(refreshToken) {
   return saveTokens(parsed);
 }
 
+// --- Phase 2: pagination + trimming helpers (wrapper-only) ---
+const PAGINATION_CONFIG = [
+  { name: 'search-contacts-advanced', path: '/contacts/search', resource: 'contacts', method: 'post' },
+  { name: 'get-contacts', path: '/contacts', resource: 'contacts', method: 'get' },
+  { name: 'get-tags-location-id', path: '/locations/{locationId}/tags', resource: 'tags', method: 'get' },
+  { name: 'get-tags-by-ids', path: '/social-media-posting/{locationId}/tags/details', resource: 'tags', method: 'get' },
+  { name: 'get-custom-fields', path: '/custom-fields', resource: 'custom-fields', method: 'get' },
+  { name: 'get-pipelines', path: '/pipelines', resource: 'pipelines', method: 'get' },
+];
+
+const CURSOR_ALLOWLIST = {
+  contacts: [
+    ['meta', 'startAfterId'],
+    ['meta', 'startAfter']
+  ],
+  tags: [],
+  'custom-fields': [],
+  pipelines: []
+};
+
+function lookupTarget(payload) {
+  try {
+    const method = typeof payload.method === 'string' ? payload.method.toLowerCase() : null;
+    const params = payload.params || {};
+    // match by explicit tool name first
+    if (method) {
+      for (const cfg of PAGINATION_CONFIG) {
+        if (cfg.name === method) return cfg;
+      }
+    }
+    // match by pathTemplate or explicit path param if present
+    const maybePath = params.path || params.pathTemplate || params.pathTemplateRaw || params.pathTemplate?.toString();
+    if (typeof maybePath === 'string') {
+      for (const cfg of PAGINATION_CONFIG) {
+        if (cfg.path === maybePath) return cfg;
+      }
+    }
+    return null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function capLimitInPayload(payload, cfg) {
+  if (!cfg) return payload;
+  // operate on a shallow clone to avoid surprising side-effects
+  const cloned = JSON.parse(JSON.stringify(payload));
+  const params = cloned.params || {};
+  // many generated tools use top-level limit or params.requestBody.limit
+  const applyLimitTo = [params, params.requestBody, params.query, params.request_body].filter(Boolean);
+  let applied = false;
+  for (const target of applyLimitTo) {
+    if (Object.prototype.hasOwnProperty.call(target, 'limit')) {
+      if (typeof target.limit === 'number') {
+        if (target.limit > 100) target.limit = 100;
+      }
+      applied = true;
+    }
+  }
+  if (!applied) {
+    // enforce default limit = 5 when missing
+    if (!Object.prototype.hasOwnProperty.call(params, 'limit')) {
+      params.limit = 5;
+    }
+  }
+  cloned.params = params;
+  return cloned;
+}
+
+function pruneValue(value, keepEmptyArrayKeys, keyName) {
+  if (value === null || value === undefined) return undefined;
+  if (typeof value === 'string') {
+    if (value === '') return undefined;
+    return value;
+  }
+  if (Array.isArray(value)) {
+    const arr = value.map((v) => pruneValue(v, keepEmptyArrayKeys)).filter((v) => v !== undefined);
+    if (arr.length === 0) {
+      if (keyName && keepEmptyArrayKeys.has(keyName)) return [];
+      return undefined;
+    }
+    return arr;
+  }
+  if (typeof value === 'object') {
+    const out = {};
+    for (const k of Object.keys(value)) {
+      const v = pruneValue(value[k], keepEmptyArrayKeys, k);
+      if (v !== undefined) out[k] = v;
+    }
+    if (Object.keys(out).length === 0) return undefined;
+    return out;
+  }
+  return value;
+}
+
+function combineName(obj) {
+  if (!obj) return null;
+  if (typeof obj === 'string' && obj.trim() !== '') return obj.trim();
+  const first = obj.firstName || obj.first_name || obj.firstname;
+  const last = obj.lastName || obj.last_name || obj.lastname;
+  if (first || last) return `${(first || '').trim()} ${(last || '').trim()}`.trim();
+  return null;
+}
+
+function transformContactsResult(raw) {
+  // find candidate items array in known locations
+  const result = raw && typeof raw === 'object' ? raw : {};
+  let items = null;
+  if (Array.isArray(result.items)) items = result.items;
+  else if (Array.isArray(result.data)) items = result.data;
+  else if (Array.isArray(result.contacts)) items = result.contacts;
+  else if (Array.isArray(result.results)) items = result.results;
+  else if (Array.isArray(raw)) items = raw;
+  else items = [];
+
+  // extract nextCursor only from explicitly allowed fields
+  function extractCursor(resource, result) {
+  const allowlist = CURSOR_ALLOWLIST[resource];
+  if (!allowlist || !result || typeof result !== 'object') return null;
+
+  for (const path of allowlist) {
+    let value = result;
+    for (const key of path) {
+      if (!value || typeof value !== 'object') {
+        value = undefined;
+        break;
+      }
+      value = value[key];
+    }
+    if (value !== undefined && value !== null) {
+      return value;
+    }
+  }
+
+  return null;
+}
+
+  const projected = items.map((it) => {
+    if (!it || typeof it !== 'object') return null;
+    const out = {};
+    if (it.id) out.id = it.id;
+    // contactName resolution
+    let contactName = null;
+    if (it.contactName) contactName = combineName(it.contactName);
+    else if (it.name) contactName = combineName(it.name);
+    if (contactName) out.contactName = contactName;
+    if (it.email) out.email = it.email;
+    if (it.phone) out.phone = it.phone;
+    if (Array.isArray(it.tags)) out.tags = it.tags.slice();
+    if (it.dateUpdated) out.dateUpdated = it.dateUpdated;
+    // prune nulls/empties but keep tags even if empty
+    const keepEmptyArrayKeys = new Set(['tags']);
+    const pruned = pruneValue(out, keepEmptyArrayKeys);
+    return pruned || null;
+  }).filter(Boolean);
+
+  const page = { hasMore: Boolean(nextCursor), nextCursor: nextCursor === undefined ? null : nextCursor };
+  return { items: projected, page };
+}
+
+function transformTagsResult(raw) {
+  const result = raw && typeof raw === 'object' ? raw : {};
+  let items = null;
+  if (Array.isArray(result.items)) items = result.items;
+  else if (Array.isArray(result.data)) items = result.data;
+  else if (Array.isArray(raw)) items = raw;
+  else items = [];
+  const projected = items.map((it) => {
+    if (!it || typeof it !== 'object') return null;
+    const out = {};
+    if (it.id) out.id = it.id;
+    if (it.name) out.name = it.name;
+    const pruned = pruneValue(out, new Set());
+    return pruned || null;
+  }).filter(Boolean);
+  const nextCursor = (result.nextCursor !== undefined ? result.nextCursor : (result.paging && result.paging.next ? result.paging.next : null));
+  return { items: projected, page: { hasMore: Boolean(nextCursor), nextCursor: nextCursor === undefined ? null : nextCursor } };
+}
+
+function transformCustomFieldsResult(raw) {
+  const result = raw && typeof raw === 'object' ? raw : {};
+  let items = null;
+  if (Array.isArray(result.items)) items = result.items;
+  else if (Array.isArray(result.data)) items = result.data;
+  else if (Array.isArray(raw)) items = raw;
+  else items = [];
+  const projected = items.map((it) => {
+    if (!it || typeof it !== 'object') return null;
+    const out = {};
+    if (it.id) out.id = it.id;
+    if (it.name) out.name = it.name;
+    if (it.fieldType || it.field_type) out.fieldType = it.fieldType || it.field_type;
+    const pruned = pruneValue(out, new Set());
+    return pruned || null;
+  }).filter(Boolean);
+  const nextCursor = (result.nextCursor !== undefined ? result.nextCursor : (result.paging && result.paging.next ? result.paging.next : null));
+  return { items: projected, page: { hasMore: Boolean(nextCursor), nextCursor: nextCursor === undefined ? null : nextCursor } };
+}
+
+function transformPipelinesResult(raw) {
+  const result = raw && typeof raw === 'object' ? raw : {};
+  let items = null;
+  if (Array.isArray(result.items)) items = result.items;
+  else if (Array.isArray(result.data)) items = result.data;
+  else if (Array.isArray(raw)) items = raw;
+  else items = [];
+  const projected = items.map((it) => {
+    if (!it || typeof it !== 'object') return null;
+    const out = {};
+    if (it.id) out.id = it.id;
+    if (it.name) out.name = it.name;
+    if (Array.isArray(it.stages)) {
+      out.stages = it.stages.map((s) => {
+        if (!s || typeof s !== 'object') return null;
+        const stage = {};
+        if (s.id) stage.id = s.id;
+        if (s.name) stage.name = s.name;
+        if (s.position !== undefined) stage.position = s.position;
+        else if (s.order !== undefined) stage.position = s.order;
+        const pruned = pruneValue(stage, new Set());
+        return pruned || null;
+      }).filter(Boolean);
+    }
+    const pruned = pruneValue(out, new Set(['stages']));
+    return pruned || null;
+  }).filter(Boolean);
+  const nextCursor = (result.nextCursor !== undefined ? result.nextCursor : (result.paging && result.paging.next ? result.paging.next : null));
+  return { items: projected, page: { hasMore: Boolean(nextCursor), nextCursor: nextCursor === undefined ? null : nextCursor } };
+}
+
+function transformForTarget(cfg, response) {
+  try {
+    const raw = (response && typeof response === 'object' && Object.prototype.hasOwnProperty.call(response, 'result')) ? response.result : response;
+    const debug = String(process.env.DEBUG_TRIMMING || '').toLowerCase() === 'true';
+    const toolName = cfg && cfg.name ? cfg.name : 'unknown';
+    const rawSize = raw ? Buffer.byteLength(JSON.stringify(raw)) : 0;
+    let transformed = null;
+    if (!cfg) return response;
+    if (cfg.resource === 'contacts') transformed = transformContactsResult(raw);
+    else if (cfg.resource === 'tags') transformed = transformTagsResult(raw);
+    else if (cfg.resource === 'custom-fields') transformed = transformCustomFieldsResult(raw);
+    else if (cfg.resource === 'pipelines') transformed = transformPipelinesResult(raw);
+    else return response;
+    if (debug) {
+      try {
+        const trimmedSize = Buffer.byteLength(JSON.stringify(transformed));
+        console.error('[TRIM] tool=' + toolName + ' raw_bytes=' + rawSize + ' trimmed_bytes=' + trimmedSize);
+      } catch (e) {
+        console.error('[TRIM] tool=' + toolName + ' sizes logged');
+      }
+    }
+    return { jsonrpc: '2.0', result: transformed, id: response && response.id !== undefined ? response.id : null };
+  } catch (err) {
+    return response;
+  }
+}
+
+
 function logMissingToken() {
   console.error('Missing token for MCP request');
 }
@@ -875,14 +1133,29 @@ const server = http.createServer(async (req, res) => {
   const hasId = payload != null && Object.prototype.hasOwnProperty.call(payload, 'id');
 
   try {
-    const response = await sendJsonRpc(payload);
+    // Determine if this call is one of the target tools/paths and adjust request/response
+    const cfg = lookupTarget(payload);
+    const prepared = capLimitInPayload(payload, cfg);
+
+    const response = await sendJsonRpc(prepared);
     if (!hasId) {
       res.writeHead(202, { 'content-type': 'application/json' });
       res.end();
       return;
     }
+
+    let out = response;
+    if (cfg && response && typeof response === 'object') {
+      try {
+        out = transformForTarget(cfg, response);
+      } catch (err) {
+        // fall back to original response on any transform error
+        out = response;
+      }
+    }
+
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(response));
+    res.end(JSON.stringify(out));
   } catch (err) {
     console.error('Failed to handle MCP request:', err);
     res.writeHead(502, { 'content-type': 'application/json' });
