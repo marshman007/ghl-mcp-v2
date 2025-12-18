@@ -15,7 +15,6 @@ const CHILD_BACKOFF_STEP_MS = 1000;
 const TOKEN_REFRESH_GRACE_MS = 2 * 60 * 1000;
 const TOKEN_URL = process.env.GHL_TOKEN_URL || 'https://services.leadconnectorhq.com/oauth/token';
 const DEFAULT_GHL_HOSTS = process.env.GHL_API_HOSTS || 'services.leadconnectorhq.com';
-const HTTP_TIMEOUT_MS = Number(process.env.HTTP_TIMEOUT_MS || 15000);
 
 const tokenStoreConfig = createTokenStoreConfig(process.env.TOKEN_STORE_JSON);
 const TOKEN_STORE_PATH = tokenStoreConfig.path;
@@ -184,14 +183,15 @@ function attach(headers, hostname, requestPath) {
   if (!shouldAttach(hostname, requestPath)) {
     return;
   }
+    
   const tokens = readTokens();
   const pathLabel = typeof requestPath === 'string' ? requestPath : '';
   if (!tokens || !tokens.access_token) {
-    console.error(`[auth] missing access token host=${hostname || 'unknown'} path=${pathLabel}`); // Avoid crashing the child when auth tokens are absent
+    console.error('[auth] missing access token host=' + (hostname || 'unknown') + ' path=' + pathLabel); // Avoid crashing the child when auth tokens are absent
     return;
   }
   if (!tokens.locationId) {
-    console.error(`[auth] missing Target-User-SubAccount host=${hostname || 'unknown'} path=${pathLabel}`); // Avoid crashing the child when subaccount header is absent
+    console.error('[auth] missing Target-User-SubAccount host=' + (hostname || 'unknown') + ' path=' + pathLabel); // Avoid crashing the child when subaccount header is absent
     return;
   }
   if (!headerExists(headers, 'authorization')) {
@@ -395,22 +395,14 @@ async function refreshAccessToken(refreshToken) {
   body.set('client_secret', clientSecret);
 
   let response;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
   try {
     response = await fetch(TOKEN_URL, {
       method: 'POST',
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
       body: body.toString(),
-      signal: controller.signal,
     });
   } catch (err) {
-    if (err && err.name === 'AbortError') {
-      throw createTokenError('Token refresh request timed out', 504);
-    }
     throw createTokenError('Failed to reach token endpoint during refresh', 502);
-  } finally {
-    clearTimeout(timeout);
   }
 
   const text = await response.text();
@@ -783,16 +775,13 @@ const server = http.createServer(async (req, res) => {
     body.set('client_id', clientId);
     body.set('client_secret', clientSecret);
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), HTTP_TIMEOUT_MS);
     try {
       const tokenResponse = await fetch(tokenUrl, {
         method: 'POST',
         headers: {
           'content-type': 'application/x-www-form-urlencoded'
         },
-        body: body.toString(),
-        signal: controller.signal
+        body: body.toString()
       });
 
       const responseText = await tokenResponse.text();
@@ -833,12 +822,9 @@ const server = http.createServer(async (req, res) => {
         }
       }));
     } catch (err) {
-      const isTimeout = err && err.name === 'AbortError';
-      console.error(isTimeout ? 'Authorization code exchange timed out:' : 'Error exchanging authorization code:', err);
-      res.writeHead(isTimeout ? 504 : 502, { 'content-type': 'application/json' });
+      console.error('Error exchanging authorization code:', err);
+      res.writeHead(502, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'Failed to exchange authorization code' }));
-    } finally {
-      clearTimeout(timeout);
     }
     return;
   }
