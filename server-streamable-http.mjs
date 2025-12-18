@@ -1183,12 +1183,13 @@ server.listen(PORT, HOST, () => {
 });
 
 function handleSignal(signal) {
+  if (signal !== 'SIGTERM' && signal !== 'SIGINT') return;
+
   if (shuttingDown) {
     console.error(`Received ${signal}, already shutting down`);
     return;
   }
   shuttingDown = true;
-
   console.error(`Received ${signal}, initiating graceful shutdown`);
 
   if (childRestartTimer) {
