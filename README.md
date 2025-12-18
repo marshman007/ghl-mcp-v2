@@ -2,6 +2,13 @@
 
 A Model Context Protocol (MCP) server providing access to the complete GoHighLevel API. This server enables AI assistants like Claude to interact with GoHighLevel's services including contacts, opportunities, calendars, workflows, and more.
 
+## Security assumptions
+
+This MCP server is designed to run behind a trusted MCP transport
+(stdio or authenticated client integration). It is not intended to be
+exposed as a public HTTP service and performs no request-level
+authentication by design.
+
 ## 🚀 Quick Start
 
 ```bash
