@@ -13,8 +13,7 @@ const MAX_CHILD_RESTARTS = 3;
 const SOCKET_DESTROY_GRACE_MS = 5000;
 const CHILD_BACKOFF_STEP_MS = 1000;
 const TOKEN_REFRESH_GRACE_MS = 2 * 60 * 1000;
-const AUTHORIZE_URL =
-  process.env.GHL_AUTHORIZE_URL || 'https://marketplace.gohighlevel.com/oauth/authorize';
+const AUTHORIZE_URL = https://services.leadconnectorhq.com/oauth/authorize;
 
 
 const DEFAULT_GHL_HOSTS = process.env.GHL_API_HOSTS || 'services.leadconnectorhq.com';
