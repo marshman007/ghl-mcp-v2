@@ -959,7 +959,7 @@ function readRequestBody(req) {
 spawnChildProcess();
 
 // Security assumption:
-// This server relies on trusted MCP transport and is not intended
+// This server relies on trusted MCP transport and is not intended.
 // to be exposed publicly. Authentication is enforced externally.
 const server = http.createServer(async (req, res) => {
   if (req.method === 'GET' && req.url === '/health') {
