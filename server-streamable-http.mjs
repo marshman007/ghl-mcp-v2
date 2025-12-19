@@ -972,7 +972,11 @@ const server = http.createServer(async (req, res) => {
     const clientId = process.env.GHL_CLIENT_ID;
     const redirectUri = process.env.GHL_REDIRECT_URI;
     const scopes = process.env.GHL_SCOPES;
-    const authorizeUrl = process.env.GHL_AUTHORIZE_URL || 'https://services.leadconnectorhq.com/oauth/authorize';
+    const authorizeBase =
+      process.env.GHL_AUTHORIZE_URL ??
+      'https://services.leadconnectorhq.com/oauth/authorize';
+
+const url = new URL(authorizeBase);
 
 
     if (!clientId || !redirectUri || !scopes) {
@@ -983,7 +987,6 @@ const server = http.createServer(async (req, res) => {
 
     let redirectLocation;
     try {
-      const url = new URL(authorizeUrl);
       url.searchParams.set('response_type', 'code');
       url.searchParams.set('client_id', clientId);
       url.searchParams.set('redirect_uri', redirectUri);
