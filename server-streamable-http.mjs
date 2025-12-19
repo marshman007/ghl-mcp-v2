@@ -985,7 +985,7 @@ const server = http.createServer(async (req, res) => {
 
   let redirectLocation;
   try {
-    const url = new URL(authorizeBase);
+    const url = new URL(AUTHORIZE_URL);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', clientId);
     url.searchParams.set('redirect_uri', redirectUri);
