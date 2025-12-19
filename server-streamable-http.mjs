@@ -13,7 +13,8 @@ const MAX_CHILD_RESTARTS = 3;
 const SOCKET_DESTROY_GRACE_MS = 5000;
 const CHILD_BACKOFF_STEP_MS = 1000;
 const TOKEN_REFRESH_GRACE_MS = 2 * 60 * 1000;
-const AUTHORIZE_URL = https://services.leadconnectorhq.com/oauth/authorize;
+const AUTHORIZE_URL = process.env.GHL_AUTHORIZE_URL || 'https://services.leadconnectorhq.com/oauth/authorize';
+const TOKEN_URL = process.env.GHL_TOKEN_URL || 'https://services.leadconnectorhq.com/oauth/token';
 
 
 const DEFAULT_GHL_HOSTS = process.env.GHL_API_HOSTS || 'services.leadconnectorhq.com';
@@ -973,9 +974,6 @@ const server = http.createServer(async (req, res) => {
   const redirectUri = process.env.GHL_REDIRECT_URI;
   const scopes = process.env.GHL_SCOPES;
 
-  const authorizeBase =
-    process.env.GHL_AUTHORIZE_URL || AUTHORIZE_URL;
-
   if (!clientId || !redirectUri || !scopes) {
     res.writeHead(500, { 'content-type': 'text/plain' });
     res.end('Missing OAuth configuration');
@@ -1027,7 +1025,7 @@ const server = http.createServer(async (req, res) => {
     const clientId = process.env.GHL_CLIENT_ID;
     const clientSecret = process.env.GHL_CLIENT_SECRET;
     const redirectUri = process.env.GHL_REDIRECT_URI;
-    const tokenUrl = process.env.GHL_TOKEN_URL || 'https://services.leadconnectorhq.com/oauth/token';
+    const tokenUrl = TOKEN_URL;
 
     if (!clientId || !clientSecret || !redirectUri) {
       res.writeHead(500, { 'content-type': 'application/json' });
