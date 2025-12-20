@@ -994,6 +994,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && (req.url === '/' || req.url === '')) {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ready');
+    return;
+  }
+
   if (req.method === 'GET' && req.url && req.url.startsWith('/oauth/start')) {
   const clientId = process.env.GHL_CLIENT_ID;
   const redirectUri = process.env.GHL_REDIRECT_URI;
