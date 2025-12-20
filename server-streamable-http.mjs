@@ -14,11 +14,6 @@ const SOCKET_DESTROY_GRACE_MS = 5000;
 const CHILD_BACKOFF_STEP_MS = 1000;
 const TOKEN_REFRESH_GRACE_MS = 2 * 60 * 1000;
 
-// MUST be marketplace.gohighlevel.com
-const AUTHORIZE_URL =
-  process.env.GHL_AUTHORIZE_URL ||
-  'https://marketplace.gohighlevel.com/oauth/authorize';
-
 // MUST be services.leadconnectorhq.com
 const TOKEN_URL =
   process.env.GHL_TOKEN_URL ||
@@ -53,6 +48,29 @@ let refreshPromise = null;
 
 const pendingResponses = new Map();
 let stdoutBuffer = Buffer.alloc(0);
+const pendingOauthStates = new Set();
+
+function rememberState(value) {
+  if (!value) return;
+  pendingOauthStates.add(value);
+  // keep the set from growing unbounded
+  if (pendingOauthStates.size > 1000) {
+    const [first] = pendingOauthStates;
+    pendingOauthStates.delete(first);
+  }
+}
+
+function validateState(value) {
+  const expected = process.env.GHL_OAUTH_STATE;
+  if (expected) {
+    return value === expected;
+  }
+  if (!value || !pendingOauthStates.has(value)) {
+    return false;
+  }
+  pendingOauthStates.delete(value);
+  return true;
+}
 
 function rejectAllPending(error) {
   for (const [key, entry] of pendingResponses.entries()) {
@@ -980,6 +998,8 @@ const server = http.createServer(async (req, res) => {
   const clientId = process.env.GHL_CLIENT_ID;
   const redirectUri = process.env.GHL_REDIRECT_URI;
   const scopes = process.env.GHL_SCOPES;
+  const installFlag = process.env.GHL_MARKETPLACE_INSTALLED;
+  const installUrl = process.env.GHL_MARKETPLACE_INSTALL_URL;
 
   if (!clientId || !redirectUri || !scopes) {
     res.writeHead(500, { 'content-type': 'text/plain' });
@@ -987,16 +1007,27 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (installFlag !== 'true') {
+    const message = installUrl
+      ? `Marketplace app must be installed before OAuth. Visit ${installUrl} to install, then set GHL_MARKETPLACE_INSTALLED=true.`
+      : 'Marketplace app must be installed via the Marketplace install link before starting OAuth. Set GHL_MARKETPLACE_INSTALLED=true after installing.';
+    res.writeHead(400, { 'content-type': 'text/plain' });
+    res.end(message);
+    return;
+  }
+
   let redirectLocation;
   try {
+    const normalizedScopes = typeof scopes === 'string' ? scopes.replace(/[+,]/g, ' ') : scopes;
     const url = new URL(`https://marketplace.gohighlevel.com/oauth/authorize`);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', clientId);
     url.searchParams.set('redirect_uri', redirectUri);
-    url.searchParams.set('scope', scopes);
+    url.searchParams.set('scope', normalizedScopes);
     const state =
       process.env.GHL_OAUTH_STATE || Math.random().toString(36).slice(2);
     url.searchParams.set('state', state);
+    rememberState(state);
     redirectLocation = url.toString();
   } catch (err) {
     console.error('Invalid GHL_AUTH_URL value:', err);
@@ -1021,9 +1052,15 @@ const server = http.createServer(async (req, res) => {
     }
 
     const code = parsedUrl.searchParams.get('code');
+    const state = parsedUrl.searchParams.get('state');
     if (!code) {
       res.writeHead(400, { 'content-type': 'application/json' });
       res.end(JSON.stringify({ error: 'Missing authorization code' }));
+      return;
+    }
+    if (!validateState(state)) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid or missing OAuth state' }));
       return;
     }
 
@@ -1057,8 +1094,9 @@ const server = http.createServer(async (req, res) => {
       const responseText = await tokenResponse.text();
       if (!tokenResponse.ok) {
         console.error('Failed to exchange authorization code:', tokenResponse.status, responseText);
+        const safeBody = responseText.slice(0, 2000);
         res.writeHead(502, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Failed to exchange authorization code' }));
+        res.end(JSON.stringify({ error: 'Failed to exchange authorization code', details: safeBody }));
         return;
       }
 
