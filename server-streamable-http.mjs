@@ -13,9 +13,16 @@ const MAX_CHILD_RESTARTS = 3;
 const SOCKET_DESTROY_GRACE_MS = 5000;
 const CHILD_BACKOFF_STEP_MS = 1000;
 const TOKEN_REFRESH_GRACE_MS = 2 * 60 * 1000;
-const AUTHORIZE_URL = process.env.GHL_AUTHORIZE_URL || 'https://services.leadconnectorhq.com/oauth/authorize';
-const TOKEN_URL = process.env.GHL_TOKEN_URL || 'https://services.leadconnectorhq.com/oauth/token';
 
+// MUST be marketplace.gohighlevel.com
+const AUTHORIZE_URL =
+  process.env.GHL_AUTHORIZE_URL ||
+  'https://marketplace.gohighlevel.com/oauth/authorize';
+
+// MUST be services.leadconnectorhq.com
+const TOKEN_URL =
+  process.env.GHL_TOKEN_URL ||
+  'https://services.leadconnectorhq.com/oauth/token';
 
 const DEFAULT_GHL_HOSTS = process.env.GHL_API_HOSTS || 'services.leadconnectorhq.com';
 
@@ -982,7 +989,7 @@ const server = http.createServer(async (req, res) => {
 
   let redirectLocation;
   try {
-    const url = new URL(AUTHORIZE_URL);
+    const url = new URL(`https://marketplace.gohighlevel.com/oauth/authorize`);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', clientId);
     url.searchParams.set('redirect_uri', redirectUri);
@@ -997,13 +1004,10 @@ const server = http.createServer(async (req, res) => {
     res.end('Invalid OAuth authorize URL');
     return;
   }
-  
-console.log('OAUTH REDIRECT →', redirectLocation);
   res.writeHead(302, { Location: redirectLocation });
   res.end();
   return;
 }
-
 
   if (req.method === 'GET' && req.url && req.url.startsWith('/oauth/callback')) {
     let parsedUrl;
