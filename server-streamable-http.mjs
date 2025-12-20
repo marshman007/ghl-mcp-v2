@@ -1,4 +1,6 @@
 console.error("BOOT: server-streamable-http.mjs starting");
+// Anchor process lifetime for Railway (stdio MCP does not keep event loop alive)
+setInterval(() => {}, 1 << 30);
 
 import http from 'node:http';
 import { Buffer } from 'node:buffer';
