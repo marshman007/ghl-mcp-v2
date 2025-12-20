@@ -997,7 +997,8 @@ const server = http.createServer(async (req, res) => {
     res.end('Invalid OAuth authorize URL');
     return;
   }
-
+  
+console.log('OAUTH REDIRECT →', redirectLocation);
   res.writeHead(302, { Location: redirectLocation });
   res.end();
   return;
