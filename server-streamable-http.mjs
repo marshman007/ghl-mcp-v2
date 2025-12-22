@@ -50,6 +50,8 @@ let refreshPromise = null;
 const pendingResponses = new Map();
 let stdoutBuffer = Buffer.alloc(0);
 const pendingOauthStates = new Set();
+let cachedInitializeResult = null;
+let cachedToolsListResult = null;
 
 function generateClientId() {
   return Math.random().toString(36).slice(2);
@@ -809,6 +811,28 @@ function shouldRequireTokens(payload) {
   return true;
 }
 
+async function ensureDiscoveryData(methodName) {
+  if (methodName === 'initialize') {
+    if (!cachedInitializeResult) {
+      const response = await sendJsonRpc({ jsonrpc: '2.0', id: 'http-init', method: 'initialize' });
+      if (response && typeof response === 'object' && Object.prototype.hasOwnProperty.call(response, 'result')) {
+        cachedInitializeResult = response.result;
+      }
+    }
+    return cachedInitializeResult;
+  }
+  if (methodName === 'tools/list' || methodName === 'tools.list' || methodName === 'list_tools') {
+    if (!cachedToolsListResult) {
+      const response = await sendJsonRpc({ jsonrpc: '2.0', id: 'http-tools-list', method: 'tools/list' });
+      if (response && typeof response === 'object' && Object.prototype.hasOwnProperty.call(response, 'result')) {
+        cachedToolsListResult = response.result;
+      }
+    }
+    return cachedToolsListResult;
+  }
+  return null;
+}
+
 function spawnChildProcess() {
   if (shuttingDown) {
     return;
@@ -1273,6 +1297,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  const methodName = typeof payload.method === 'string' ? payload.method.toLowerCase() : '';
+  const isDiscovery = methodName === 'initialize' || methodName === 'tools/list' || methodName === 'tools.list' || methodName === 'list_tools';
+
   const requiresTokens = shouldRequireTokens(payload);
   if (requiresTokens) {
     try {
@@ -1290,6 +1317,19 @@ const server = http.createServer(async (req, res) => {
   const targetSseClient = Array.isArray(sseHeader) ? sseHeader[0] : sseHeader;
 
   try {
+    if (isDiscovery) {
+      const result = await ensureDiscoveryData(methodName);
+      if (!result) {
+        res.writeHead(502, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Discovery data unavailable' }));
+        return;
+      }
+      const discoveryResponse = { jsonrpc: '2.0', id: hasId ? payload.id : null, result };
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(discoveryResponse));
+      return;
+    }
+
     // Determine if this call is one of the target tools/paths and adjust request/response
     const cfg = lookupTarget(payload);
     const prepared = capLimitInPayload(payload, cfg);
