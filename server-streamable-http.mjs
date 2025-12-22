@@ -797,6 +797,9 @@ function shouldRequireTokens(payload) {
   if (!method) {
     return false;
   }
+  if (method === 'initialize') {
+    return false;
+  }
   if (method === 'tools/list' || method === 'tools.list' || method === 'list_tools') {
     return false;
   }
