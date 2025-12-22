@@ -1,6 +1,4 @@
 console.error("BOOT: server-streamable-http.mjs starting");
-// Anchor process lifetime for Railway (stdio MCP does not keep event loop alive)
-setInterval(() => {}, 1 << 30);
 
 import http from 'node:http';
 import { Buffer } from 'node:buffer';
@@ -41,6 +39,7 @@ let socketsDestroyed = false;
 let childSignaled = false;
 const sockets = new Set();
 let socketDestroyTimer = null;
+const sseClients = new Map();
 
 let activeTokens = loadTokens();
 if (activeTokens) {
@@ -51,6 +50,74 @@ let refreshPromise = null;
 const pendingResponses = new Map();
 let stdoutBuffer = Buffer.alloc(0);
 const pendingOauthStates = new Set();
+
+function generateClientId() {
+  return Math.random().toString(36).slice(2);
+}
+
+function removeSseClient(clientId) {
+  const client = sseClients.get(clientId);
+  sseClients.delete(clientId);
+  if (!client) {
+    return;
+  }
+  try {
+    if (!client.writableEnded) {
+      client.end();
+    }
+  } catch (err) {
+    console.error('Failed to close SSE client', err);
+  }
+}
+
+function sendSseEvent(clientId, eventName, payload) {
+  const target = sseClients.get(clientId);
+  if (!target || target.destroyed || target.writableEnded) {
+    removeSseClient(clientId);
+    return false;
+  }
+  try {
+    target.write(`event: ${eventName}\n`);
+    target.write(`data: ${JSON.stringify(payload)}\n\n`);
+    return true;
+  } catch (err) {
+    console.error('Failed to write SSE event', err);
+    removeSseClient(clientId);
+    return false;
+  }
+}
+
+function registerSseClient(res, requestedId) {
+  const clientId = requestedId || generateClientId();
+  if (requestedId && sseClients.has(requestedId)) {
+    removeSseClient(requestedId);
+  }
+  res.writeHead(200, {
+    'content-type': 'text/event-stream',
+    'cache-control': 'no-cache',
+    connection: 'keep-alive',
+  });
+  res.write(`event: ready\ndata: ${JSON.stringify({ clientId })}\n\n`);
+  sseClients.set(clientId, res);
+  res.on('close', () => removeSseClient(clientId));
+  res.on('error', () => removeSseClient(clientId));
+  return clientId;
+}
+
+function closeAllSseClients() {
+  for (const [clientId, res] of sseClients.entries()) {
+    try {
+      if (!res.writableEnded) {
+        res.write(`event: shutdown\ndata: ${JSON.stringify({ reason: 'server_closing' })}\n\n`);
+      }
+      res.end();
+    } catch (err) {
+      console.error('Failed to notify SSE client of shutdown', err);
+    } finally {
+      sseClients.delete(clientId);
+    }
+  }
+}
 
 function rememberState(value) {
   if (!value) return;
@@ -1012,6 +1079,23 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url && req.url.startsWith('/sse')) {
+    let parsedUrl;
+    try {
+      parsedUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    } catch (err) {
+      console.error('Failed to parse SSE URL:', err);
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Invalid SSE request URL' }));
+      return;
+    }
+    const requestedId = parsedUrl.searchParams.get('clientId') || undefined;
+    const clientId = registerSseClient(res, requestedId);
+    req.socket?.setKeepAlive?.(true);
+    console.error(`SSE client connected: ${clientId}`);
+    return;
+  }
+
   if (req.method === 'GET' && req.url && req.url.startsWith('/oauth/start')) {
   const clientId = process.env.GHL_CLIENT_ID;
   const redirectUri = process.env.GHL_REDIRECT_URI;
@@ -1199,6 +1283,8 @@ const server = http.createServer(async (req, res) => {
   }
 
   const hasId = payload != null && Object.prototype.hasOwnProperty.call(payload, 'id');
+  const sseHeader = req.headers['x-sse-client-id'] || req.headers['x-client-id'] || null;
+  const targetSseClient = Array.isArray(sseHeader) ? sseHeader[0] : sseHeader;
 
   try {
     // Determine if this call is one of the target tools/paths and adjust request/response
@@ -1222,10 +1308,17 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    if (targetSseClient && out) {
+      sendSseEvent(String(targetSseClient), 'mcp-response', out);
+    }
+
     res.writeHead(200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(out));
   } catch (err) {
     console.error('Failed to handle MCP request:', err);
+    if (targetSseClient) {
+      sendSseEvent(String(targetSseClient), 'mcp-error', { error: 'Failed to execute MCP request' });
+    }
     res.writeHead(502, { 'content-type': 'application/json' });
     res.end(JSON.stringify({ error: 'Failed to execute MCP request' }));
   }
@@ -1264,6 +1357,8 @@ function handleSignal(signal) {
     clearTimeout(childRestartTimer);
     childRestartTimer = null;
   }
+
+  closeAllSseClients();
 
   server.close(() => {
     console.error('HTTP server closed');
