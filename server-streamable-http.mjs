@@ -773,8 +773,10 @@ function spawnChildProcess() {
   });
 
   child.on('error', (err) => {
-    console.error('Failed to start MCP server:', err);
-    process.exit(1);
+    console.error('MCP server process error:', err);
+    child = null;
+    rejectAllPending(new Error('MCP server encountered an error'));
+    scheduleChildRestart('error');
   });
 
   child.on('exit', (code, signal) => {
@@ -790,21 +792,29 @@ function spawnChildProcess() {
     console.error(`MCP server exited with code ${code} signal ${signal}`);
     rejectAllPending(new Error('MCP server exited unexpectedly'));
 
-    if (childRestartAttempts >= MAX_CHILD_RESTARTS) {
-      console.error('Exceeded maximum MCP restart attempts, exiting');
-      process.exit(1);
-    }
-
-    childRestartAttempts += 1;
-    const delay = childRestartAttempts * CHILD_BACKOFF_STEP_MS;
-    console.error(`Restarting MCP server in ${delay}ms (attempt ${childRestartAttempts}/${MAX_CHILD_RESTARTS})`);
-
-    childRestartTimer = setTimeout(() => {
-      childRestartTimer = null;
-      spawnChildProcess();
-    }, delay);
-    childRestartTimer.unref();
+    scheduleChildRestart(`exit code=${code} signal=${signal || 'none'}`);
   });
+}
+
+function scheduleChildRestart(reason) {
+  if (shuttingDown) {
+    return;
+  }
+
+  if (childRestartAttempts >= MAX_CHILD_RESTARTS) {
+    console.error(`Not restarting MCP server (${reason}); maximum attempts reached (${childRestartAttempts}/${MAX_CHILD_RESTARTS})`);
+    return;
+  }
+
+  childRestartAttempts += 1;
+  const delay = childRestartAttempts * CHILD_BACKOFF_STEP_MS;
+  console.error(`Restarting MCP server in ${delay}ms (attempt ${childRestartAttempts}/${MAX_CHILD_RESTARTS}) due to ${reason}`);
+
+  childRestartTimer = setTimeout(() => {
+    childRestartTimer = null;
+    spawnChildProcess();
+  }, delay);
+  childRestartTimer.unref();
 }
 
 function signalChildProcess() {
@@ -1248,7 +1258,7 @@ function handleSignal(signal) {
     return;
   }
   shuttingDown = true;
-  console.error(`Received ${signal}, initiating graceful shutdown`);
+  console.error(`Received ${signal}, initiating graceful shutdown (Railway lifecycle signal)`);
 
   if (childRestartTimer) {
     clearTimeout(childRestartTimer);
