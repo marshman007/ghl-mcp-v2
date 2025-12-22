@@ -1,0 +1,10 @@
+{
+  "build": {
+    "builder": "nixpacks"
+  },
+  "deploy": {
+    "startCommand": "node server-streamable-http.mjs",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300
+  }
+}
