@@ -6,7 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { listToolsForClient } from './tool-registry.js';
+import { listToolsForClient } from "./build/tool-registry.js";
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = "0.0.0.0";

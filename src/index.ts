@@ -21,7 +21,7 @@ import {
 import { z, ZodError } from 'zod';
 import { jsonSchemaToZod } from 'json-schema-to-zod';
 import axios, { type AxiosRequestConfig, type AxiosError } from 'axios';
-import { toolDefinitionMap as toolDefinitionMapBase } from './tool-registry.js';
+import { toolDefinitionMap as toolDefinitionMapBase } from "./tool-registry.js";
 
 /**
  * Type definition for JSON objects
