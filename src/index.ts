@@ -59,9 +59,6 @@ const server = new Server(
     { capabilities: { tools: {} } }
 );
 
-import { toolDefinitionMap } from './tool-registry.js';
-
-
 /**
  * Security schemes from the OpenAPI spec
  */
