@@ -6,6 +6,7 @@ import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { listToolsForClient } from './src/tool-registry.js';
 
 const PORT = Number(process.env.PORT || 8080);
 const HOST = "0.0.0.0";
@@ -27,6 +28,11 @@ process.env.GHL_TOKEN_STORE_PATH = TOKEN_STORE_PATH;
 process.env.GHL_API_HOSTS = DEFAULT_GHL_HOSTS;
 
 const HEADER_INJECTOR_PATH = ensureHeaderInjectorModule();
+const STATIC_INITIALIZE_RESULT = Object.freeze({
+  protocolVersion: '2024-11-05',
+  capabilities: { tools: {} },
+  serverInfo: { name: 'sl-mcp-v2', version: '1.0.0' }
+});
 
 let shuttingDown = false;
 let child = null;
@@ -50,8 +56,6 @@ let refreshPromise = null;
 const pendingResponses = new Map();
 let stdoutBuffer = Buffer.alloc(0);
 const pendingOauthStates = new Set();
-let cachedInitializeResult = null;
-let cachedToolsListResult = null;
 
 function generateClientId() {
   return Math.random().toString(36).slice(2);
@@ -519,6 +523,39 @@ async function refreshAccessToken(refreshToken) {
   return saveTokens(parsed);
 }
 
+function cloneForResponse(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+function buildDiscoveryResponse(methodName, payload) {
+  const id = payload && Object.prototype.hasOwnProperty.call(payload, 'id') ? payload.id : null;
+  try {
+    if (methodName === 'initialize') {
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: cloneForResponse(STATIC_INITIALIZE_RESULT),
+      };
+    }
+    if (methodName === 'tools/list' || methodName === 'tools.list' || methodName === 'list_tools') {
+      const tools = listToolsForClient();
+      if (!tools.length) throw new Error('Tool definitions unavailable');
+      return {
+        jsonrpc: '2.0',
+        id,
+        result: { tools: cloneForResponse(tools) },
+      };
+    }
+  } catch (err) {
+    console.error('Failed to construct discovery response:', err);
+  }
+  return {
+    jsonrpc: '2.0',
+    id,
+    error: { code: -32603, message: 'Internal error' },
+  };
+}
+
 // --- Phase 2: pagination + trimming helpers (wrapper-only) ---
 const PAGINATION_CONFIG = [
   { name: 'search-contacts-advanced', path: '/contacts/search', resource: 'contacts', method: 'post' },
@@ -809,28 +846,6 @@ function shouldRequireTokens(payload) {
     return false;
   }
   return true;
-}
-
-async function ensureDiscoveryData(methodName) {
-  if (methodName === 'initialize') {
-    if (!cachedInitializeResult) {
-      const response = await sendJsonRpc({ jsonrpc: '2.0', id: 'http-init', method: 'initialize' });
-      if (response && typeof response === 'object' && Object.prototype.hasOwnProperty.call(response, 'result')) {
-        cachedInitializeResult = response.result;
-      }
-    }
-    return cachedInitializeResult;
-  }
-  if (methodName === 'tools/list' || methodName === 'tools.list' || methodName === 'list_tools') {
-    if (!cachedToolsListResult) {
-      const response = await sendJsonRpc({ jsonrpc: '2.0', id: 'http-tools-list', method: 'tools/list' });
-      if (response && typeof response === 'object' && Object.prototype.hasOwnProperty.call(response, 'result')) {
-        cachedToolsListResult = response.result;
-      }
-    }
-    return cachedToolsListResult;
-  }
-  return null;
 }
 
 function spawnChildProcess() {
@@ -1313,23 +1328,24 @@ const server = http.createServer(async (req, res) => {
   }
 
   const hasId = payload != null && Object.prototype.hasOwnProperty.call(payload, 'id');
+  const responseId = hasId ? payload.id : null;
   const sseHeader = req.headers['x-sse-client-id'] || req.headers['x-client-id'] || null;
   const targetSseClient = Array.isArray(sseHeader) ? sseHeader[0] : sseHeader;
 
-  try {
-    if (isDiscovery) {
-      const result = await ensureDiscoveryData(methodName);
-      if (!result) {
-        res.writeHead(502, { 'content-type': 'application/json' });
-        res.end(JSON.stringify({ error: 'Discovery data unavailable' }));
-        return;
-      }
-      const discoveryResponse = { jsonrpc: '2.0', id: hasId ? payload.id : null, result };
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify(discoveryResponse));
-      return;
+  if (isDiscovery) {
+    let discoveryResponse;
+    try {
+      discoveryResponse = buildDiscoveryResponse(methodName, payload);
+    } catch (err) {
+      console.error('Failed to handle discovery request:', err);
+      discoveryResponse = { jsonrpc: '2.0', id: responseId, error: { code: -32603, message: 'Internal error' } };
     }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(discoveryResponse));
+    return;
+  }
 
+  try {
     // Determine if this call is one of the target tools/paths and adjust request/response
     const cfg = lookupTarget(payload);
     const prepared = capLimitInPayload(payload, cfg);
